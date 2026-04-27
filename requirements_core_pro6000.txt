@@ -1,0 +1,12 @@
+# Core dependency lock for RTX PRO 6000 / RTX 50 series deployment.
+# Install with: pip install -r requirements.txt -r requirements_core_pro6000.txt
+
+torch==2.8.0
+torchaudio==2.8.0
+torchvision==0.23.0
+xfuser==0.4.5
+vllm==0.11.0
+flash-attn==2.8.3
+ninja>=1.11.1
+packaging>=24.0
+psutil>=5.9

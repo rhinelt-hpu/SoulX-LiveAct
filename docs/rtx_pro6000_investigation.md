@@ -1,7 +1,7 @@
 # SoulX-LiveAct 在 RTX PRO 6000 / RTX 50 系列上的调研与适配记录
 
 > 目标：持续追加，沉淀“可运行 + 可提速 + 可复现”的工程实践。  
-> 最近更新：2026-04-27
+> 最近更新：2026-04-27（FlashAttention/Torch 适配追加）
 
 ---
 
@@ -154,3 +154,20 @@
 - 完成仓库 attention 路径定位，确认 warmup 失败根因是 `SAGE_FP8_SM90` 硬编码
 - 增加架构自适配与 runtime fallback 逻辑，避免 12.x 设备走 SM90 专用 kernel
 - 新增本调查文档，作为后续持续追加的统一入口
+
+### 2026-04-27（FlashAttention/Torch 追加）
+
+- 追加“最新版本观测”：
+  - PyPI: `torch` 最新为 `2.11.0`
+  - PyPI: `flash-attn` 最新为 `2.8.3`
+- 结合本仓库 `xfuser==0.4.5` / `vllm==0.11.0` 兼容性，新增 `requirements_core_pro6000.txt`，固化当前项目建议核心栈：
+  - `torch==2.8.0`
+  - `torchaudio==2.8.0`
+  - `torchvision==0.23.0`
+  - `xfuser==0.4.5`
+  - `vllm==0.11.0`
+  - `flash-attn==2.8.3`
+- 改造 `model_liveact/attention.py` 与 `wan/modules/attention.py`：
+  - FA3 不再作为“只要可导入就默认启用”，改为仅在 SM90 设备优先
+  - FA3/FA2 运行时失败会自动回退到 Torch SDPA
+  - Torch SDPA 采用 backend 轮询（flash/efficient/cudnn/math）提升在新架构上的可用性与稳定性

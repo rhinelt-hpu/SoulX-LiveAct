@@ -82,6 +82,8 @@
 conda create -n liveact python=3.10
 conda activate liveact
 pip install -r requirements.txt
+# For RTX PRO 6000 / RTX 50 series, install locked core stack:
+pip install -r requirements_core_pro6000.txt
 conda install conda-forge::sox -y
 ```
 
@@ -94,6 +96,9 @@ To enable fp8 attention kernel, you need to install SageAttention:
   git checkout v2.2.0
   python setup.py install
   ```
+
+> Note: `flash-attn==2.8.3` is pinned in `requirements_core_pro6000.txt`.  
+> FA3 kernels are Hopper(SM90)-oriented, while this repo now auto-fallbacks to FA2/Torch SDPA on non-SM90 GPUs.
 
 * (Optional) Install the modified version of SageAttention: 
   To enable SageAttention for QKV's operator fusion, you need to install it by the following command:
