@@ -1,6 +1,8 @@
 # Copyright 2024-2025 The Alibaba Wan Team Authors. All rights reserved.
+import logging
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from einops import rearrange, repeat
 
 try:
@@ -17,7 +19,7 @@ except:
     
 try:
     from sageattention import sageattn
-    # USE_SAGEATTN = True
+    USE_SAGEATTN = True
     logging.info("Using sageattn")
 except:
     USE_SAGEATTN = False
@@ -30,6 +32,33 @@ __all__ = [
     'sdpa_attention',
     'flex_attention',
 ]
+
+
+def _is_sm90(device):
+    if not torch.cuda.is_available():
+        return False
+    cuda_device = device if isinstance(device, torch.device) else torch.device(device)
+    major, _ = torch.cuda.get_device_capability(cuda_device)
+    return major == 9
+
+
+def _sdpa_fallback(q, k, v, attn_mask=None, causal=False, dropout_p=0.0):
+    if hasattr(torch.nn, "attention") and hasattr(torch.nn.attention, "sdpa_kernel"):
+        backend_names = ("FLASH_ATTENTION", "EFFICIENT_ATTENTION", "CUDNN_ATTENTION", "MATH")
+        for backend_name in backend_names:
+            backend = getattr(torch.nn.attention.SDPBackend, backend_name, None)
+            if backend is None:
+                continue
+            try:
+                with torch.nn.attention.sdpa_kernel(backends=[backend]):
+                    return F.scaled_dot_product_attention(
+                        q, k, v, attn_mask=attn_mask, is_causal=causal, dropout_p=dropout_p
+                    )
+            except RuntimeError:
+                continue
+    return F.scaled_dot_product_attention(
+        q, k, v, attn_mask=attn_mask, is_causal=causal, dropout_p=dropout_p
+    )
 
 
 def flash_attention(
@@ -101,41 +130,60 @@ def flash_attention(
             'Flash attention 3 is not available, use flash attention 2 instead.'
         )
 
-    # apply attention
-    if (version is None or version == 3) and FLASH_ATTN_3_AVAILABLE:
-        # Note: dropout_p, window_size are not supported in FA3 now.
-        x = flash_attn_interface.flash_attn_varlen_func(
-            q=q,
-            k=k,
-            v=v,
-            cu_seqlens_q=torch.cat([q_lens.new_zeros([1]), q_lens]).cumsum(
-                0, dtype=torch.int32).to(q.device, non_blocking=True),
-            cu_seqlens_k=torch.cat([k_lens.new_zeros([1]), k_lens]).cumsum(
-                0, dtype=torch.int32).to(q.device, non_blocking=True),
-            seqused_q=None,
-            seqused_k=None,
-            max_seqlen_q=lq,
-            max_seqlen_k=lk,
-            softmax_scale=softmax_scale,
-            causal=causal,
-            deterministic=deterministic)[0].unflatten(0, (b, lq))
-    else:
-        assert FLASH_ATTN_2_AVAILABLE
-        x = flash_attn.flash_attn_varlen_func(
-            q=q,
-            k=k,
-            v=v,
-            cu_seqlens_q=torch.cat([q_lens.new_zeros([1]), q_lens]).cumsum(
-                0, dtype=torch.int32).to(q.device, non_blocking=True),
-            cu_seqlens_k=torch.cat([k_lens.new_zeros([1]), k_lens]).cumsum(
-                0, dtype=torch.int32).to(q.device, non_blocking=True),
-            max_seqlen_q=lq,
-            max_seqlen_k=lk,
-            dropout_p=dropout_p,
-            softmax_scale=softmax_scale,
-            causal=causal,
-            window_size=window_size,
-            deterministic=deterministic).unflatten(0, (b, lq))
+    cu_seqlens_q = torch.cat([q_lens.new_zeros([1]), q_lens]).cumsum(0, dtype=torch.int32).to(
+        q.device, non_blocking=True
+    )
+    cu_seqlens_k = torch.cat([k_lens.new_zeros([1]), k_lens]).cumsum(0, dtype=torch.int32).to(
+        q.device, non_blocking=True
+    )
+
+    prefer_fa3 = (version is None or version == 3) and FLASH_ATTN_3_AVAILABLE and _is_sm90(q.device)
+    if prefer_fa3:
+        try:
+            # Note: dropout_p, window_size are not supported in FA3 now.
+            x = flash_attn_interface.flash_attn_varlen_func(
+                q=q,
+                k=k,
+                v=v,
+                cu_seqlens_q=cu_seqlens_q,
+                cu_seqlens_k=cu_seqlens_k,
+                seqused_q=None,
+                seqused_k=None,
+                max_seqlen_q=lq,
+                max_seqlen_k=lk,
+                softmax_scale=softmax_scale,
+                causal=causal,
+                deterministic=deterministic
+            )[0].unflatten(0, (b, lq))
+            return x.type(out_dtype)
+        except RuntimeError as err:
+            warnings.warn(f"Flash attention 3 failed, fallback to FA2/SDPA: {err}")
+
+    if FLASH_ATTN_2_AVAILABLE:
+        try:
+            x = flash_attn.flash_attn_varlen_func(
+                q=q,
+                k=k,
+                v=v,
+                cu_seqlens_q=cu_seqlens_q,
+                cu_seqlens_k=cu_seqlens_k,
+                max_seqlen_q=lq,
+                max_seqlen_k=lk,
+                dropout_p=dropout_p,
+                softmax_scale=softmax_scale,
+                causal=causal,
+                window_size=window_size,
+                deterministic=deterministic
+            ).unflatten(0, (b, lq))
+            return x.type(out_dtype)
+        except RuntimeError as err:
+            warnings.warn(f"Flash attention 2 failed, fallback to Torch SDPA: {err}")
+
+    q_sdpa = q.unflatten(0, (b, lq)).transpose(1, 2).to(dtype)
+    k_sdpa = k.unflatten(0, (b, lk)).transpose(1, 2).to(dtype)
+    v_sdpa = v.unflatten(0, (b, lk)).transpose(1, 2).to(dtype)
+    x = _sdpa_fallback(q_sdpa, k_sdpa, v_sdpa, attn_mask=None, causal=causal, dropout_p=dropout_p)
+    x = x.transpose(1, 2).contiguous()
 
     # output
     return x.type(out_dtype)
@@ -183,8 +231,7 @@ def attention(
         k = k.transpose(1, 2).to(dtype)
         v = v.transpose(1, 2).to(dtype)
 
-        out = torch.nn.functional.scaled_dot_product_attention(
-            q, k, v, attn_mask=attn_mask, is_causal=causal, dropout_p=dropout_p)
+        out = _sdpa_fallback(q, k, v, attn_mask=attn_mask, causal=causal, dropout_p=dropout_p)
 
         out = out.transpose(1, 2).contiguous()
         return out
@@ -232,8 +279,7 @@ def sdpa_attention(
     #         return_lse=False,
     #     )
     # else:    
-    out = torch.nn.functional.scaled_dot_product_attention(
-        q, k, v, attn_mask=attn_mask, is_causal=causal, dropout_p=dropout_p)
+    out = _sdpa_fallback(q, k, v, attn_mask=attn_mask, causal=causal, dropout_p=dropout_p)
 
     out = out.transpose(1, 2).contiguous()
     return out

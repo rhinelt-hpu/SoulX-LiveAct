@@ -29,6 +29,7 @@
 
 ## 🔥🔥🔥 News
 
+* 📘 Apr 27, 2026: Added an ongoing investigation and optimization note for RTX PRO 6000 / RTX 50 series: `docs/rtx_pro6000_investigation.md`.
 * 📢 Mar 18, 2026: We now support consumer GPUs (e.g., RTX 4090, RTX 5090) with FP8 KV cache and CPU model offloading. In our tests, the 18B model (14B Wan2.1 + 4B audio module) achieves a throughput of 6 FPS on a single RTX 5090.
 * 👋 Mar 16, 2026: We release the inference code and model weights of SoulX-LiveAct.
 
@@ -81,6 +82,8 @@
 conda create -n liveact python=3.10
 conda activate liveact
 pip install -r requirements.txt
+# For RTX PRO 6000 / RTX 50 series, install locked core stack:
+pip install -r requirements_core_pro6000.txt
 conda install conda-forge::sox -y
 ```
 
@@ -93,6 +96,9 @@ To enable fp8 attention kernel, you need to install SageAttention:
   git checkout v2.2.0
   python setup.py install
   ```
+
+> Note: `flash-attn==2.8.3` is pinned in `requirements_core_pro6000.txt`.  
+> FA3 kernels are Hopper(SM90)-oriented, while this repo now auto-fallbacks to FA2/Torch SDPA on non-SM90 GPUs.
 
 * (Optional) Install the modified version of SageAttention: 
   To enable SageAttention for QKV's operator fusion, you need to install it by the following command:
