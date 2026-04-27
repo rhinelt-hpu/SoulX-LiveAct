@@ -151,6 +151,7 @@ class WanLayerNorm(nn.LayerNorm):
 
 
 class WanSelfAttention(nn.Module):
+    LONG_CTX_ATTN_PRIORITY = ("SAGE_FP8", "SAGE_AUTO", "TORCH_FLASH", "TORCH_EFFICIENT", "TORCH_MATH")
 
     def __init__(self,
                  dim,
@@ -224,12 +225,12 @@ class WanSelfAttention(nn.Module):
 
     def _select_long_ctx_attn_type(self, device):
         if not torch.cuda.is_available():
-            return None
+            raise RuntimeError("CUDA is required for WanSelfAttention long-context attention path.")
         major, _ = torch.cuda.get_device_capability(device)
         candidates = []
         if major == 9 and hasattr(AttnType, "SAGE_FP8_SM90"):
             candidates.append(AttnType.SAGE_FP8_SM90)
-        for name in ["SAGE_FP8", "SAGE_AUTO", "TORCH_FLASH", "TORCH_EFFICIENT", "TORCH_MATH"]:
+        for name in self.LONG_CTX_ATTN_PRIORITY:
             if hasattr(AttnType, name):
                 candidates.append(getattr(AttnType, name))
         self._long_ctx_attn_candidates = [candidate.value for candidate in candidates]
@@ -369,8 +370,11 @@ class WanSelfAttention(nn.Module):
         except RuntimeError as err:
             err_msg = str(err).lower()
             if "sm90" in err_msg or "compute capability" in err_msg or "not supported" in err_msg:
-                fallback_type = getattr(AttnType, "SAGE_FP8", None) or getattr(AttnType, "TORCH_FLASH", None) \
-                    or getattr(AttnType, "TORCH_EFFICIENT", None) or getattr(AttnType, "TORCH_MATH", None)
+                fallback_type = None
+                for name in self.LONG_CTX_ATTN_PRIORITY:
+                    if hasattr(AttnType, name):
+                        fallback_type = getattr(AttnType, name)
+                        break
                 if fallback_type is None:
                     raise
                 logging.warning(
