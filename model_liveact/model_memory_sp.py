@@ -151,6 +151,8 @@ class WanLayerNorm(nn.LayerNorm):
 
 
 class WanSelfAttention(nn.Module):
+    # Priority for non-SM90 devices: prefer Sage FP8 kernels first, then progressively
+    # more generic torch backends to maximize compatibility on newer consumer GPUs.
     LONG_CTX_ATTN_PRIORITY = ("SAGE_FP8", "SAGE_AUTO", "TORCH_FLASH", "TORCH_EFFICIENT", "TORCH_MATH")
 
     def __init__(self,
@@ -232,6 +234,7 @@ class WanSelfAttention(nn.Module):
         for name in self.LONG_CTX_ATTN_PRIORITY:
             if hasattr(AttnType, name):
                 candidates.append(getattr(AttnType, name))
+        # Keep candidate names for diagnostics so warmup failures can be quickly triaged.
         candidate_names = [candidate.value for candidate in candidates]
         return (candidates[0] if candidates else None), candidate_names
 
