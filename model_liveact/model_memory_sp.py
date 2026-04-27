@@ -179,6 +179,7 @@ class WanSelfAttention(nn.Module):
         self.memory_proj_v = nn.Conv1d(self.dim, self.dim, kernel_size=5, stride=5, groups=self.dim, bias=False)
         self._long_ctx_attn = None
         self._long_ctx_attn_type = None
+        self._long_ctx_attn_candidates = []
 
     def post_init(self, device):
         self.memory_proj_k = nn.Conv1d(self.dim, self.dim, kernel_size=5, stride=5, groups=self.dim, bias=False).to(
@@ -231,6 +232,7 @@ class WanSelfAttention(nn.Module):
         for name in ["SAGE_FP8", "SAGE_AUTO", "TORCH_FLASH", "TORCH_EFFICIENT", "TORCH_MATH"]:
             if hasattr(AttnType, name):
                 candidates.append(getattr(AttnType, name))
+        self._long_ctx_attn_candidates = [candidate.value for candidate in candidates]
         for attn_type in candidates:
             try:
                 xFuserLongContextAttention(attn_type=attn_type)
@@ -245,7 +247,16 @@ class WanSelfAttention(nn.Module):
         self._long_ctx_attn_type = self._select_long_ctx_attn_type(device)
         if self._long_ctx_attn_type is None:
             self._long_ctx_attn = xFuserLongContextAttention()
-            logging.warning("No explicit xFuser attn_type selected, using xFuser default.")
+            cc = "unknown"
+            if torch.cuda.is_available():
+                major, minor = torch.cuda.get_device_capability(device)
+                cc = f"{major}.{minor}"
+            logging.warning(
+                "No explicit xFuser attn_type selected for compute capability %s; "
+                "tried candidates=%s. Falling back to xFuser default attention implementation.",
+                cc,
+                self._long_ctx_attn_candidates,
+            )
         else:
             self._long_ctx_attn = xFuserLongContextAttention(attn_type=self._long_ctx_attn_type)
             logging.info("xFuser long context attention type selected: %s", self._long_ctx_attn_type.value)
