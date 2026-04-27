@@ -37,7 +37,8 @@ __all__ = [
 def _is_sm90(device):
     if not torch.cuda.is_available():
         return False
-    major, _ = torch.cuda.get_device_capability(device)
+    cuda_device = device if isinstance(device, torch.device) else torch.device(device)
+    major, _ = torch.cuda.get_device_capability(cuda_device)
     return major == 9
 
 
