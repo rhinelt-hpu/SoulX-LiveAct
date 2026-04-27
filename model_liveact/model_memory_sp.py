@@ -177,6 +177,8 @@ class WanSelfAttention(nn.Module):
         self.attn_mask = None
         self.memory_proj_k = nn.Conv1d(self.dim, self.dim, kernel_size=5, stride=5, groups=self.dim, bias=False)
         self.memory_proj_v = nn.Conv1d(self.dim, self.dim, kernel_size=5, stride=5, groups=self.dim, bias=False)
+        self._long_ctx_attn = None
+        self._long_ctx_attn_type = None
 
     def post_init(self, device):
         self.memory_proj_k = nn.Conv1d(self.dim, self.dim, kernel_size=5, stride=5, groups=self.dim, bias=False).to(
@@ -218,6 +220,36 @@ class WanSelfAttention(nn.Module):
                                     device=f'cuda:{int(os.getenv("RANK", 0))}')
         self.kv_idx2 = torch.tensor(list(range(14 * frame_len // world_size)),
                                     device=f'cuda:{int(os.getenv("RANK", 0))}')
+
+    def _select_long_ctx_attn_type(self, device):
+        if not torch.cuda.is_available():
+            return None
+        major, _ = torch.cuda.get_device_capability(device)
+        candidates = []
+        if major == 9 and hasattr(AttnType, "SAGE_FP8_SM90"):
+            candidates.append(AttnType.SAGE_FP8_SM90)
+        for name in ["SAGE_FP8", "SAGE_AUTO", "TORCH_FLASH", "TORCH_EFFICIENT", "TORCH_MATH"]:
+            if hasattr(AttnType, name):
+                candidates.append(getattr(AttnType, name))
+        for attn_type in candidates:
+            try:
+                xFuserLongContextAttention(attn_type=attn_type)
+                return attn_type
+            except Exception:
+                continue
+        return None
+
+    def _get_long_ctx_attention(self, device):
+        if self._long_ctx_attn is not None:
+            return self._long_ctx_attn
+        self._long_ctx_attn_type = self._select_long_ctx_attn_type(device)
+        if self._long_ctx_attn_type is None:
+            self._long_ctx_attn = xFuserLongContextAttention()
+            logging.warning("No explicit xFuser attn_type selected, using xFuser default.")
+        else:
+            self._long_ctx_attn = xFuserLongContextAttention(attn_type=self._long_ctx_attn_type)
+            logging.info("xFuser long context attention type selected: %s", self._long_ctx_attn_type.value)
+        return self._long_ctx_attn
 
     def _move_kv_cache_to_device(self, kv_cache, device):
         kv_cache["k"] = kv_cache["k"].to(device=device, non_blocking=True)
@@ -316,14 +348,43 @@ class WanSelfAttention(nn.Module):
             [[0, 3], [3, 7]] if end_idx == 14 * frame_seqlen else \
                 [[0, 3], [3, 7]] if end_idx == 22 * frame_seqlen else -1
 
-        x = xFuserLongContextAttention(attn_type=AttnType.SAGE_FP8_SM90)(
-            None,
-            query=causal_rope_apply(q, grid_sizes, freqs, sp_size, sp_rank,
-                                    start_frame=0 if end_idx == 6 * frame_seqlen else 6).type_as(v),
-            key=rope_apply(kv_cache["k"][:, kv_idx], grid_sizes, freqs, f_list=f_list, rope_list=rope_list).type_as(v),
-            value=kv_cache["v"][:, kv_idx],
-            window_size=self.window_size
-        )
+        query = causal_rope_apply(
+            q, grid_sizes, freqs, sp_size, sp_rank, start_frame=0 if end_idx == 6 * frame_seqlen else 6
+        ).type_as(v)
+        key = rope_apply(kv_cache["k"][:, kv_idx], grid_sizes, freqs, f_list=f_list, rope_list=rope_list).type_as(v)
+        value = kv_cache["v"][:, kv_idx]
+        try:
+            x = self._get_long_ctx_attention(v.device)(
+                None,
+                query=query,
+                key=key,
+                value=value,
+                window_size=self.window_size
+            )
+        except RuntimeError as err:
+            err_msg = str(err).lower()
+            if "sm90" in err_msg or "compute capability" in err_msg or "not supported" in err_msg:
+                fallback_type = getattr(AttnType, "SAGE_FP8", None) or getattr(AttnType, "TORCH_FLASH", None) \
+                    or getattr(AttnType, "TORCH_EFFICIENT", None) or getattr(AttnType, "TORCH_MATH", None)
+                if fallback_type is None:
+                    raise
+                logging.warning(
+                    "xFuser attention kernel fallback triggered from %s to %s: %s",
+                    self._long_ctx_attn_type.value if self._long_ctx_attn_type else "default",
+                    fallback_type.value,
+                    err,
+                )
+                self._long_ctx_attn_type = fallback_type
+                self._long_ctx_attn = xFuserLongContextAttention(attn_type=fallback_type)
+                x = self._long_ctx_attn(
+                    None,
+                    query=query,
+                    key=key,
+                    value=value,
+                    window_size=self.window_size
+                )
+            else:
+                raise
 
         self._store_kv_cache(kv_cache, k_cache, v_cache)
 

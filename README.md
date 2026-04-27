@@ -29,6 +29,7 @@
 
 ## 🔥🔥🔥 News
 
+* 📘 Apr 27, 2026: Added an ongoing investigation and optimization note for RTX PRO 6000 / RTX 50 series: `docs/rtx_pro6000_investigation.md`.
 * 📢 Mar 18, 2026: We now support consumer GPUs (e.g., RTX 4090, RTX 5090) with FP8 KV cache and CPU model offloading. In our tests, the 18B model (14B Wan2.1 + 4B audio module) achieves a throughput of 6 FPS on a single RTX 5090.
 * 👋 Mar 16, 2026: We release the inference code and model weights of SoulX-LiveAct.
 
