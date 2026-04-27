@@ -227,7 +227,7 @@ class WanSelfAttention(nn.Module):
     def _select_long_ctx_attn_type(self, device):
         if not torch.cuda.is_available():
             raise RuntimeError("CUDA is required for WanSelfAttention long-context attention path.")
-        major, _ = torch.cuda.get_device_capability(device)
+        major, *_ = torch.cuda.get_device_capability(device)
         candidates = []
         if major == 9 and hasattr(AttnType, "SAGE_FP8_SM90"):
             candidates.append(AttnType.SAGE_FP8_SM90)
