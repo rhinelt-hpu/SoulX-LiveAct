@@ -233,13 +233,7 @@ class WanSelfAttention(nn.Module):
             if hasattr(AttnType, name):
                 candidates.append(getattr(AttnType, name))
         self._long_ctx_attn_candidates = [candidate.value for candidate in candidates]
-        for attn_type in candidates:
-            try:
-                xFuserLongContextAttention(attn_type=attn_type)
-                return attn_type
-            except Exception:
-                continue
-        return None
+        return candidates[0] if candidates else None
 
     def _get_long_ctx_attention(self, device):
         if self._long_ctx_attn is not None:
@@ -253,7 +247,7 @@ class WanSelfAttention(nn.Module):
                 cc = f"{major}.{minor}"
             logging.warning(
                 "No explicit xFuser attn_type selected for compute capability %s; "
-                "tried candidates=%s. Falling back to xFuser default attention implementation.",
+                "candidate priority list=%s. Falling back to xFuser default attention implementation.",
                 cc,
                 self._long_ctx_attn_candidates,
             )
